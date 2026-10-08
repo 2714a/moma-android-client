@@ -84,6 +84,8 @@ class LoginActivity : AppCompatActivity() {
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
+                // 登录成功后移动云会回调到 redirect_uri，带 code / ticket 参数
+                if (url != null) interceptCallback(url)
                 val cookies = collectCookies()
                 val hit = looksLoggedIn(cookies)
                 statusLine.text = if (hit) {
@@ -96,7 +98,14 @@ class LoginActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(
                 view: WebView?,
                 request: WebResourceRequest?,
-            ): Boolean = false
+            ): Boolean {
+                val u = request?.url?.toString() ?: return false
+                // 回调地址不加载，直接截获参数
+                if (u.contains("/api/login/oauth2/code/") || u.contains("code=")) {
+                    if (interceptCallback(u)) return true
+                }
+                return false
+            }
         }
 
         // H5 调摄像头（扫码登录）必须由 App 代理授权
@@ -187,10 +196,12 @@ class LoginActivity : AppCompatActivity() {
     /** 汇总当前 WebView 在移动云主站的所有 Cookie */
     private fun collectCookies(): String {
         val cm = CookieManager.getInstance()
-        val urls = listOf(
+        val urls = mutableListOf(
             "https://ecloud.10086.cn",
-            "https://ecloud.10086.cn/portal/product/MaaS",
-            "https://console.ecloud.10086.cn",
+            "https://ecloud.10086.cn/portal",
+            "https://ecloud.10086.cn/home",
+            // 控制台是分省域名，这里带上当前配置的区域
+            "https://${cfg.consoleHost}",
             "https://zhenze-huhehaote.cmecloud.cn",
         )
         val set = LinkedHashSet<String>()
@@ -199,6 +210,46 @@ class LoginActivity : AppCompatActivity() {
             c.split(";").map { it.trim() }.filter { it.isNotEmpty() }.forEach { set.add(it) }
         }
         return set.joinToString("; ")
+    }
+
+    /**
+     * 截获 OAuth2 回调 URL，取出 code / ticket / access_token 等参数。
+     * 返回 true 表示已识别为回调（调用方应阻断加载）。
+     */
+    private fun interceptCallback(url: String): Boolean {
+        if (!url.contains("/api/login/oauth2/code/") &&
+            !url.contains("access_token=") &&
+            !url.contains("?code=") &&
+            !url.contains("&code=")
+        ) return false
+
+        try {
+            val q = Uri.parse(url).query ?: return false
+            val at = Uri.parse(url).getQueryParameter("access_token")
+            val rt = Uri.parse(url).getQueryParameter("refresh_token")
+            val code = Uri.parse(url).getQueryParameter("code")
+
+            if (!at.isNullOrBlank()) {
+                cfg.accessToken = at
+                if (!rt.isNullOrBlank()) cfg.refreshToken = rt
+                statusLine.text = "已捕获 access_token（${at.length} 字符）"
+            }
+            if (!code.isNullOrBlank()) {
+                // 授权码：Chrome 侧无法换取 token，但说明登录已完成
+                statusLine.text = "登录回调已捕获（code ${code.length} 字符）· 请点右上角“保存”"
+            }
+            // 无论哪种，都把 Cookie 收一遍
+            if (!at.isNullOrBlank() || !code.isNullOrBlank()) {
+                val cookies = collectCookies()
+                if (cookies.isNotBlank()) {
+                    cfg.cookie = cookies
+                    cfg.cookieTs = System.currentTimeMillis()
+                }
+                return true
+            }
+        } catch (_: Exception) {
+        }
+        return false
     }
 
     private fun looksLoggedIn(cookies: String): Boolean {
@@ -235,14 +286,34 @@ class LoginActivity : AppCompatActivity() {
 
     /** 登录后自动尝试拉取 API Key 并写入设置，省去「先设置 key」这一步 */
     private fun autoFillKeys(cookies: String) {
-        statusLine.text = "已保存登录态，正在尝试自动获取 API Key…"
+        statusLine.text = "已保存登录态，正在验证登录并尝试获取 API Key…"
         Thread {
-            val api = EcloudApi(cookies)
+            val api = EcloudApi(cookies, cfg.accessToken, cfg.consoleHost)
+
+            // 1) 先用实测存在的 login-status 接口验证会话是否真的有效
+            val status = api.checkLoginStatus()
+            if (!status.ok) {
+                runOnUiThread {
+                    statusLine.text = "登录态未通过验证：${status.title}"
+                    AlertDialog.Builder(this)
+                        .setTitle("登录可能未完成")
+                        .setMessage(
+                            "已保存 Cookie，但移动云返回仍未登录：\n\n${status.detail}\n\n" +
+                                "建议：回到网页里确认已进入控制台首页后再点「保存登录」。\n" +
+                                "（也可先保存，稍后在首页点「诊断与登录态」复查）",
+                        )
+                        .setPositiveButton("知道了") { _, _ -> setResult(RESULT_OK); finish() }
+                        .setNegativeButton("继续登录") { _, _ -> }
+                        .show()
+                }
+                return@Thread
+            }
+
+            // 2) 登录有效，尝试自动抓 Key
             val raw = api.fetchApiKeysRaw()
             val keys = if (raw != null) api.extractKeyList(raw) else emptyList()
             runOnUiThread {
                 if (keys.isNotEmpty()) {
-                    // 去重合并，保留已有 Key
                     val merged = LinkedHashSet<String>(cfg.apiKeys)
                     val before = merged.size
                     merged.addAll(keys)
@@ -255,15 +326,23 @@ class LoginActivity : AppCompatActivity() {
                         Toast.LENGTH_LONG,
                     ).show()
                 } else {
-                    statusLine.text = "登录已保存 · 未自动获取到 Key，可到「设置」手动填写"
-                    Toast.makeText(
-                        this,
-                        "登录已保存。未自动获取到 API Key，请到「设置」手动填写",
-                        Toast.LENGTH_LONG,
-                    ).show()
+                    // 登录有效但拿不到 Key —— 明确告知手动路径，不再让用户困惑
+                    statusLine.text = "登录成功 · 未自动获取到 Key，需手动填一次"
+                    AlertDialog.Builder(this)
+                        .setTitle("登录成功 ✅")
+                        .setMessage(
+                            "移动云登录态已验证有效。\n\n" +
+                                "但 API Key 未能自动读取（控制台接口未公开，路径需要按实际修正）。\n" +
+                                "请手动填一次，之后长期有效：\n\n" +
+                                "1. 在本页网页里点进「控制台」；\n" +
+                                "2. 左侧「系统管理 → API Key」创建或复制一个 Key；\n" +
+                                "3. 回到首页点「设置」粘贴保存。",
+                        )
+                        .setPositiveButton("好的") { _, _ -> setResult(RESULT_OK); finish() }
+                        .show()
                 }
                 setResult(RESULT_OK)
-                finish()
+                if (keys.isNotEmpty()) finish()
             }
         }.start()
     }
