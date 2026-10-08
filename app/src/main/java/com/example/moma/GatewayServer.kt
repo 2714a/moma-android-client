@@ -50,6 +50,39 @@ class GatewayServer(
     private val logs = ArrayDeque<String>()
     private val logLock = Any()
 
+    /** 每个 Key 的使用次数（按 Key 索引） */
+    private val keyUsage = HashMap<Int, Int>()
+    private val usageLock = Any()
+
+    fun keyUsageSnapshot(): Map<Int, Int> = synchronized(usageLock) { HashMap(keyUsage) }
+
+    private fun bumpUsage(idx: Int) {
+        synchronized(usageLock) { keyUsage[idx] = (keyUsage[idx] ?: 0) + 1 }
+    }
+
+    /** 测试所有 Key 的有效性，返回 (索引, 是否有效, 说明) 列表 */
+    fun testKeys(): List<Triple<Int, Boolean, String>> {
+        val result = mutableListOf<Triple<Int, Boolean, String>>()
+        keys.forEachIndexed { i, k ->
+            val t0 = System.currentTimeMillis()
+            var ok = false
+            var note = ""
+            try {
+                val rb = Request.Builder().url("$upstreamBase/models").get()
+                    .header("Authorization", "Bearer $k")
+                http.newCall(rb.build()).execute().use { resp ->
+                    ok = resp.isSuccessful
+                    note = if (ok) "HTTP ${resp.code}" else "HTTP ${resp.code} ${resp.message}"
+                }
+            } catch (e: Exception) {
+                note = e.message ?: "网络错误"
+            }
+            val ms = System.currentTimeMillis() - t0
+            result.add(Triple(i, ok, "$note · ${ms}ms"))
+        }
+        return result
+    }
+
     private fun log(s: String) {
         val ts = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(Date())
         val line = "$ts  $s"
@@ -67,8 +100,15 @@ class GatewayServer(
         if (keys.isEmpty()) return null
         val i = keyIdx % keys.size
         keyIdx++
+        bumpUsage(i)
         return keys[i] to (i + 1)
     }
+
+    /** 当前轮询指针位置 */
+    fun currentKeyIndex(): Int = keyIdx % (keys.size.coerceAtLeast(1))
+
+    /** 上游基址（供外部展示） */
+    fun upstreamUrl(): String = upstreamBase
 
     fun start() {
         if (isRunning) return
