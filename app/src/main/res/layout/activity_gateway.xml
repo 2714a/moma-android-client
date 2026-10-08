@@ -249,7 +249,7 @@
                 android:text="设置" />
         </LinearLayout>
 
-        <!-- 按钮：API Key | 电池优化白名单 -->
+        <!-- 按钮：自动获取 Key | 并发压测 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -262,8 +262,8 @@
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_marginEnd="6dp"
-                android:layout_weight="1"
-                android:text="API Key" />
+                android:layout_weight="1.4"
+                android:text="获取 API Key（自动回填）" />
 
             <TextView
                 android:id="@+id/btnStress"
