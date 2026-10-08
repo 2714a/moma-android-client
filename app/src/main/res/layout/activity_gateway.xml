@@ -181,7 +181,7 @@
             app:backgroundTint="#1F6BFF"
             app:cornerRadius="28dp" />
 
-        <!-- 按钮：登录/更新会话 | 模型列表 -->
+        <!-- 按钮：登录/更新会话 | 登录态检测 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -198,14 +198,22 @@
                 android:text="登录 / 更新会话" />
 
             <TextView
-                android:id="@+id/btnModels"
+                android:id="@+id/btnCheckLogin"
                 style="@style/PillButton"
                 android:layout_width="0dp"
                 android:layout_height="48dp"
                 android:layout_marginStart="6dp"
                 android:layout_weight="1"
-                android:text="模型列表" />
+                android:text="检测登录态" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/btnModels"
+            style="@style/PillButton"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="12dp"
+            android:text="模型列表" />
 
         <TextView
             android:id="@+id/btnSignin"
@@ -263,7 +271,7 @@
                 android:layout_height="48dp"
                 android:layout_marginEnd="6dp"
                 android:layout_weight="1.4"
-                android:text="获取 API Key（自动回填）" />
+                android:text="获取 API Key（自动）" />
 
             <TextView
                 android:id="@+id/btnStress"
