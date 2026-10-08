@@ -34,6 +34,23 @@ class ConfigStore(ctx: Context) {
         get() = sp.getInt("port", 8080)
         set(v) = sp.edit().putInt("port", v).apply()
 
+    /** 移动云网页登录 Cookie（WebView 抓取或手动粘贴） */
+    var cookie: String
+        get() = sp.getString("cookie", "") ?: ""
+        set(v) = sp.edit().putString("cookie", v).apply()
+
+    /** Cookie 抓取时间戳 */
+    var cookieTs: Long
+        get() = sp.getLong("cookie_ts", 0L)
+        set(v) = sp.edit().putLong("cookie_ts", v).apply()
+
+    /** 移动云门户首页（WebView 登录入口） */
+    var portalUrl: String
+        get() = sp.getString("portal_url", "https://ecloud.10086.cn/portal/product/MaaS") ?: ""
+        set(v) = sp.edit().putString("portal_url", v).apply()
+
+    fun hasCookie(): Boolean = cookie.isNotBlank() && cookie.contains("=")
+
     fun hasKey(): Boolean = apiKeys.isNotEmpty()
 
     /** 网关地址描述，用于界面展示 */
