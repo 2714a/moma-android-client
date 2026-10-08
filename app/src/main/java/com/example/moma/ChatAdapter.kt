@@ -1,16 +1,24 @@
 package com.example.moma
 
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
+import android.widget.PopupMenu
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 
-/** 聊天消息适配器：user / assistant 两种气泡布局。 */
+/**
+ * 聊天消息适配器：user / assistant 两种气泡布局。
+ * 长按消息弹出菜单：复制 / 重新生成（AI）/ 重发（用户）。
+ */
 class ChatAdapter(
     private val messages: MutableList<Message>,
+    private val onCopy: (Message) -> Unit,
+    private val onRegenerate: (Int) -> Unit,
+    private val onResend: (Int) -> Unit,
 ) : RecyclerView.Adapter<ChatAdapter.VH>() {
 
-    class VH(view: android.view.View) : RecyclerView.ViewHolder(view) {
+    class VH(view: View) : RecyclerView.ViewHolder(view) {
         val text: TextView = view.findViewById(android.R.id.text1)
     }
 
@@ -24,7 +32,31 @@ class ChatAdapter(
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
-        holder.text.text = messages[position].content
+        val msg = messages[position]
+        holder.text.text = msg.content
+        holder.itemView.setOnLongClickListener { v ->
+            showMenu(v, position)
+            true
+        }
+    }
+
+    private fun showMenu(anchor: View, position: Int) {
+        val popup = PopupMenu(anchor.context, anchor)
+        popup.menu.add(0, 1, 0, "复制")
+        if (messages[position].role == "assistant") {
+            popup.menu.add(0, 2, 1, "重新生成")
+        } else {
+            popup.menu.add(0, 3, 1, "重新发送")
+        }
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> onCopy(messages[position])
+                2 -> onRegenerate(position)
+                3 -> onResend(position)
+            }
+            true
+        }
+        popup.show()
     }
 
     override fun getItemCount(): Int = messages.size
