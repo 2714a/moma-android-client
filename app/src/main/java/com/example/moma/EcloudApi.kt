@@ -9,163 +9,290 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
- * 移动云（ecloud.10086.cn）网页接口封装。
+ * 移动云（ecloud.10086.cn）接口封装。
  *
- * 说明：这些是「网页控制台」侧的接口，鉴权靠登录 Cookie（由 LoginActivity 抓取）。
- * 由于平台接口可能调整，这里对每个接口都做了「多候选路径回退 + 优雅降级」：
- * 任一候选成功即返回；全部失败则返回可读的错误信息，而不是抛异常。
+ * ============================ 实测事实（2026-10） ============================
+ *
+ * 1) 登录态接口（在 ecloud.10086.cn 上，无需额外鉴权即可探测）：
+ *      GET /iam/api/v1/login-status
+ *      → {"state":"OK","body":{"login":false,"ticket":null,"expiresIn":null},...}
+ *    登录后 login=true。
+ *
+ * 2) 登录流程是标准 OAuth2 授权码模式：
+ *      GET /iam/oidc/authorize?response_type=code&client_id=opgateway
+ *          &state=xxx&redirect_uri=https://ecloud.10086.cn/api/login/oauth2/code/opgateway&scope=openid
+ *      → 未登录时 302 到 /op-login-static/login/user?service=<上面的 authorize URL>
+ *      → 登录后回调 redirect_uri?code=xxx&state=xxx
+ *    再由后端用 code 换 token（浏览器侧拿不到，只能靠 WebView 完成的会话）。
+ *
+ * 3) **控制台不在 ecloud.10086.cn**，而是分省域名：
+ *      console-huhehaote-1.cmecloud.cn / console-beijing-1.cmecloud.cn / ...
+ *    当前沙箱网络无法访问这些域名（DNS 只解析出 IPv6，连接超时），
+ *    但手机正常网络可以访问。因此这里把控制台域名做成可配置项。
+ *
+ * 4) 推理网关 zhenze-huhehaote.cmecloud.cn 可达：
+ *      GET /v1/models → 401
+ *      "Request denied by Apikey Extract check. Provide an API key using
+ *       X-Api-Key or Authorization: Bearer <API_KEY>."
+ *
+ * ============================ 设计结论 ============================
+ * 由于控制台确切的业务接口路径无法从公网静态资源中确认，
+ * 本类不再"盲猜一堆路径"，而是：
+ *   A. 用**已实测存在**的接口做登录态判断（/iam/api/v1/login-status）；
+ *   B. 把控制台区域域名做成可配置，逐个尝试；
+ *   C. 业务接口用「候选路径 × 候选域名」矩阵探测，并把**每一次尝试的
+ *      HTTP 状态码与响应片段**完整回传，方便用户反馈后精准修正；
+ *   D. 判定"成功"的标准放宽为 HTTP 200 且响应里没有明显的错误标记，
+ *      避免把 JSON 错误响应当成成功。
  */
-class EcloudApi(private val cookie: String) {
+class EcloudApi(
+    private val cookie: String,
+    private val accessToken: String = "",
+    consoleHost: String = DEFAULT_CONSOLE_HOST,
+) {
 
     private val http = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(40, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .followRedirects(true)
         .build()
 
-    private val baseCandidates = listOf(
-        "https://ecloud.10086.cn",
-        "https://console.ecloud.10086.cn",
-    )
-
     private val ua =
-        "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/120.0 Mobile Safari/537.36"
+
+    /** 门户（登录态、公告等）；实测可达 */
+    private val portalHost = "https://ecloud.10086.cn"
+
+    /** 控制台区域域名（业务接口在这里） */
+    private val consoleCandidates: List<String> = LinkedHashSet<String>().apply {
+        if (consoleHost.isNotBlank()) add(consoleHost)
+        add(DEFAULT_CONSOLE_HOST)
+        add("console-beijing-1.cmecloud.cn")
+        add("console-shanghai-1.cmecloud.cn")
+    }.map { if (it.startsWith("http")) it.trimEnd('/') else "https://" + it.trimEnd('/') }
 
     class Result(val ok: Boolean, val title: String, val detail: String)
 
+    /** 单次请求的探测痕迹，用于诊断 */
+    data class Trace(val url: String, val code: Int, val body: String) {
+        fun line(): String = "${shortUrl(url)} → HTTP $code ${snippet()}"
+        private fun shortUrl(u: String) = u.removePrefix("https://").let {
+            if (it.length > 72) it.take(72) + "…" else it
+        }
+        private fun snippet(): String {
+            val b = body.replace(Regex("\\s+"), " ").trim()
+            return if (b.isEmpty()) "" else "\n    ${if (b.length > 160) b.take(160) + "…" else b}"
+        }
+    }
+
     // ---------- 基础请求 ----------
 
-    private fun get(url: String): Pair<Int, String> {
-        val rb = Request.Builder().url(url).get()
-            .header("Cookie", cookie)
-            .header("User-Agent", ua)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Referer", "https://ecloud.10086.cn/")
+    private fun headers(b: Request.Builder): Request.Builder = b
+        .header("User-Agent", ua)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Accept-Language", "zh-CN,zh;q=0.9")
+        .header("Referer", "$portalHost/")
+        .apply {
+            if (cookie.isNotBlank()) header("Cookie", cookie)
+            if (accessToken.isNotBlank()) header("Authorization", "Bearer $accessToken")
+        }
+
+    private fun get(url: String): Trace {
         return try {
-            http.newCall(rb.build()).execute().use { r ->
-                r.code to (r.body?.string() ?: "")
+            http.newCall(headers(Request.Builder().url(url).get()).build()).execute().use { r ->
+                Trace(url, r.code, r.body?.string() ?: "")
             }
         } catch (e: Exception) {
-            -1 to (e.message ?: "网络错误")
+            Trace(url, -1, "网络错误: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 
-    private fun post(url: String, json: String): Pair<Int, String> {
-        val rb = Request.Builder().url(url)
-            .post(json.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .header("Cookie", cookie)
-            .header("User-Agent", ua)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Content-Type", "application/json; charset=utf-8")
-            .header("Referer", "https://ecloud.10086.cn/")
+    private fun post(url: String, json: String): Trace {
+        val rb = headers(
+            Request.Builder().url(url)
+                .post(json.toRequestBody("application/json; charset=utf-8".toMediaType()))
+        ).header("Content-Type", "application/json; charset=utf-8").build()
         return try {
-            http.newCall(rb.build()).execute().use { r ->
-                r.code to (r.body?.string() ?: "")
+            http.newCall(rb).execute().use { r ->
+                Trace(url, r.code, r.body?.string() ?: "")
             }
         } catch (e: Exception) {
-            -1 to (e.message ?: "网络错误")
+            Trace(url, -1, "网络错误: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 
-    /** 依次尝试多个候选路径，返回第一个 HTTP 200 的结果 */
-    private fun tryPaths(paths: List<String>, method: String = "GET", body: String = ""): Pair<Int, String> {
-        var last: Pair<Int, String> = -1 to "无候选路径"
-        for (b in baseCandidates) {
+    /**
+     * 响应是否是"业务成功"。
+     * 200 还不够——很多网关会用 200 + errorCode 返回失败。
+     */
+    private fun isSuccess(t: Trace): Boolean {
+        if (t.code != 200) return false
+        val b = t.body.trim()
+        if (b.isEmpty()) return false
+        // 常见失败标记
+        val bad = listOf("\"state\":\"ERROR\"", "\"success\":false", "\"code\":401",
+            "\"code\":403", "errorCode", "权限不足", "未登录", "登录已过期")
+        return bad.none { b.contains(it, ignoreCase = true) }
+    }
+
+    /**
+     * 在「候选域名 × 候选路径」矩阵上探测，返回
+     * Triple(命中, 全部痕迹, 错误聚合说明)。
+     */
+    private fun probe(
+        paths: List<String>,
+        method: String = "GET",
+        body: String = "",
+        onConsoleOnly: Boolean = true,
+    ): Triple<Trace?, List<Trace>, String> {
+        val traces = ArrayList<Trace>()
+        val bases = if (onConsoleOnly) consoleCandidates else consoleCandidates + portalHost
+        for (base in bases) {
             for (p in paths) {
-                val url = b + p
-                val r = if (method == "POST") post(url, body) else get(url)
-                if (r.first == 200) return r
-                last = r
+                val url = base + p
+                val t = if (method == "POST") post(url, body) else get(url)
+                traces.add(t)
+                if (isSuccess(t)) return Triple(t, traces, "")
             }
         }
-        return last
+        val summary = traces.joinToString("\n") { "• " + it.line() }
+        return Triple(null, traces, summary)
+    }
+
+    // ---------- 0. 登录态检测（实测可用） ----------
+
+    /**
+     * 通过 /iam/api/v1/login-status 判断是否已登录。
+     * 这个接口不需要 Cookie 也能调，返回 body.login 表示是否登录。
+     */
+    fun checkLoginStatus(): Result {
+        val t = get("$portalHost/iam/api/v1/login-status?time=${System.currentTimeMillis()}")
+        if (t.code != 200) {
+            return Result(false, "无法连接移动云",
+                "HTTP ${t.code}\n${t.body.take(300)}\n\n请检查网络后重试。")
+        }
+        val logged = try {
+            JSONObject(t.body).optJSONObject("body")?.optBoolean("login") ?: false
+        } catch (_: Exception) {
+            false
+        }
+        return if (logged) {
+            Result(true, "移动云登录态有效",
+                "login-status 返回已登录。\n" +
+                    if (accessToken.isNotBlank()) "access_token: 已获取（${accessToken.length} 字符）"
+                    else "access_token: 未获取（部分控制台接口需要）")
+        } else {
+            Result(false, "未登录移动云",
+                "login-status 返回 login=false。\n请在「登录 / 更新会话」里完成移动云登录。")
+        }
     }
 
     // ---------- 1. 获取模型列表 ----------
 
-    fun fetchModels(): Result {
-        val r = tryPaths(
-            listOf(
-                "/api/moma/model/list",
-                "/moma/api/model/list",
-                "/api/modelSquare/list",
-                "/api/moma/models",
-            ),
-        )
-        if (r.first != 200) return Result(
-            false, "获取模型列表失败",
-            "HTTP ${r.first}\n${r.second.take(300)}\n\n（平台接口可能已调整，或 Cookie 已过期）",
-        )
-        return Result(true, "模型列表获取成功", summarizeModels(r.second))
+    /**
+     * 模型列表优先走推理网关的 /v1/models（这个接口路径是确定存在的），
+     * 因为控制台的模型广场接口路径无法确认。
+     */
+    fun fetchModels(baseUrl: String, apiKey: String): Result {
+        val url = baseUrl.trimEnd('/').removeSuffix("/chat/completions") + "/models"
+        val t = try {
+            val rb = Request.Builder().url(url).get()
+                .header("User-Agent", ua)
+                .header("Accept", "application/json")
+                .apply { if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey") }
+                .build()
+            http.newCall(rb).execute().use { r -> Trace(url, r.code, r.body?.string() ?: "") }
+        } catch (e: Exception) {
+            Trace(url, -1, "网络错误: ${e.message}")
+        }
+        if (t.code != 200) {
+            return Result(false, "获取模型列表失败",
+                "• ${t.line()}\n\n" +
+                    if (t.code == 401) "提示：网关要求 API Key，请先配置有效的 Key。" else "")
+        }
+        return Result(true, "模型列表获取成功", summarizeModels(t.body))
     }
 
-    private fun summarizeModels(json: String): String {
-        return try {
-            val obj = JSONObject(json)
-            val arr = obj.optJSONArray("data")
-                ?: obj.optJSONArray("result")
-                ?: obj.optJSONArray("rows")
-                ?: obj.optJSONArray("list")
-            if (arr == null) return json.take(800)
+    private fun summarizeModels(json: String): String = try {
+        val obj = JSONObject(json)
+        val arr = obj.optJSONArray("data")
+            ?: obj.optJSONArray("result")
+            ?: obj.optJSONArray("rows")
+            ?: obj.optJSONArray("list")
+        if (arr == null) json.take(800)
+        else {
             val sb = StringBuilder("共 ${arr.length()} 个模型：\n")
-            for (i in 0 until minOf(arr.length(), 60)) {
+            for (i in 0 until minOf(arr.length(), 80)) {
                 val o = arr.optJSONObject(i) ?: continue
-                val id = o.optString("modelId").ifBlank {
-                    o.optString("model").ifBlank { o.optString("id") }
-                }
-                val name = o.optString("modelName").ifBlank {
-                    o.optString("name").ifBlank { id }
-                }
-                sb.append("• $id")
-                if (name != id && name.isNotBlank()) sb.append("  ($name)")
-                sb.append("\n")
+                val id = o.optString("id").ifBlank { o.optString("modelId").ifBlank { o.optString("model") } }
+                if (id.isBlank()) continue
+                sb.append("• ").append(id).append('\n')
             }
-            if (arr.length() > 60) sb.append("… 还有 ${arr.length() - 60} 个")
+            if (arr.length() > 80) sb.append("… 还有 ${arr.length() - 80} 个")
             sb.toString()
-        } catch (_: Exception) {
-            json.take(800)
         }
+    } catch (_: Exception) {
+        json.take(800)
     }
 
     // ---------- 2. 签到领积分 ----------
 
+    /**
+     * 签到。控制台具体路径未知 → 矩阵探测，并把每条尝试都回传，
+     * 用户把日志发回来即可精准定位真实接口。
+     */
     fun signIn(): Result {
-        // 先查签到状态
-        val st = tryPaths(listOf("/api/moma/sign/status", "/api/user/sign/status", "/api/score/sign/status"))
-        val body = "{}"
-        val r = tryPaths(
-            listOf("/api/moma/sign/in", "/api/moma/sign", "/api/user/sign", "/api/score/sign"),
-            "POST", body,
+        val (hit, traces, err) = probe(
+            listOf(
+                "/api/ai/signIn",
+                "/api/ai/sign/in",
+                "/api/ai/user/sign",
+                "/api/moma/signIn",
+                "/api/moma/user/signIn",
+                "/api/user/signIn",
+                "/api/sign/in",
+                "/api/signIn",
+                "/api/score/signIn",
+                "/api/points/signIn",
+            ),
+            "POST", "{}",
         )
-        if (r.first != 200) return Result(
-            false, "签到失败",
-            "HTTP ${r.first}\n${r.second.take(300)}\n\n（平台接口可能已调整，或 Cookie 已过期）",
-        )
-        val detail = buildString {
-            append("上游返回：\n").append(r.second.take(500)).append("\n")
-            if (st.first == 200) append("\n签到状态：\n").append(st.second.take(300))
+        if (hit == null) {
+            return Result(
+                false, "签到接口未命中",
+                "在控制台域名上试了 ${traces.size} 个候选路径，均未成功：\n\n$err\n\n" +
+                    "说明：移动云控制台接口未公开文档，需按实际请求修正。" +
+                    "请把以上日志反馈，我会替换为真实路径。",
+            )
         }
-        return Result(true, "签到已提交", detail)
+        return Result(true, "签到已提交", "命中：${hit.url}\n\n${hit.body.take(600)}")
     }
 
     // ---------- 3. 查询额度 ----------
 
     fun fetchQuota(): Result {
-        val r = tryPaths(
+        val (hit, traces, err) = probe(
             listOf(
-                "/api/moma/user/quota",
+                "/api/ai/quota",
+                "/api/ai/user/quota",
+                "/api/ai/account/balance",
+                "/api/moma/quota",
                 "/api/user/quota",
-                "/api/moma/account/balance",
-                "/api/user/account/balance",
+                "/api/account/balance",
                 "/api/finance/account/balance",
-                "/api/moma/resource/pack",
+                "/api/ai/resource/pack",
+                "/api/order/queryResource",
+                "/api/user/account/queryBalance",
             ),
         )
-        if (r.first != 200) return Result(
-            false, "查询额度失败",
-            "HTTP ${r.first}\n${r.second.take(300)}\n\n（平台接口可能已调整，或 Cookie 已过期）",
-        )
-        return Result(true, "额度查询成功", prettyJson(r.second))
+        if (hit == null) {
+            return Result(
+                false, "额度接口未命中",
+                "在控制台域名上试了 ${traces.size} 个候选路径，均未成功：\n\n$err\n\n请把日志反馈以便精准修正。",
+            )
+        }
+        return Result(true, "额度查询成功", "命中：${hit.url}\n\n${prettyJson(hit.body)}")
     }
 
     private fun prettyJson(json: String): String = try {
@@ -177,8 +304,7 @@ class EcloudApi(private val cookie: String) {
             val k = keys.next()
             val v = o.opt(k)
             if (v !is JSONObject && v !is JSONArray) {
-                sb.append("$k: $v\n")
-                n++
+                sb.append(k).append(": ").append(v).append('\n'); n++
             }
         }
         if (sb.isEmpty()) json.take(800) else sb.toString()
@@ -188,35 +314,53 @@ class EcloudApi(private val cookie: String) {
 
     // ---------- 4. 自动获取 API Key ----------
 
-    fun fetchApiKeys(): Result {
-        val r = tryPaths(
+    fun fetchApiKeysRaw(): String? {
+        val (hit, _, _) = probe(
             listOf(
+                "/api/ai/apikey/list",
+                "/api/ai/apiKey/list",
                 "/api/moma/apikey/list",
                 "/api/apikey/list",
                 "/api/user/apikey/list",
-                "/api/moma/apiKey/page",
+                "/api/ai/apiKey/page",
+                "/api/iam/apikey/list",
+                "/api/user/apiKey/queryList",
             ),
         )
-        if (r.first != 200) return Result(
-            false, "获取 API Key 失败",
-            "HTTP ${r.first}\n${r.second.take(300)}\n\n（平台接口可能已调整，或 Cookie 已过期）",
+        return hit?.body
+    }
+
+    fun fetchApiKeys(): Result {
+        val (hit, traces, err) = probe(
+            listOf(
+                "/api/ai/apikey/list",
+                "/api/ai/apiKey/list",
+                "/api/moma/apikey/list",
+                "/api/apikey/list",
+                "/api/user/apikey/list",
+                "/api/ai/apiKey/page",
+            ),
         )
-        return Result(true, "API Key 获取成功", extractKeys(r.second))
-    }
-
-    /** 从返回 JSON 中尽量提取出 key 字段 */
-    fun extractKeys(json: String): String {
-        return try {
-            val found = LinkedHashSet<String>()
-            collectKeys(Any2Json.parse(json), found)
-            if (found.isEmpty()) json.take(800)
-            else "发现 ${found.size} 个 Key：\n" + found.joinToString("\n") { "• $it" }
-        } catch (_: Exception) {
-            json.take(800)
+        if (hit == null) {
+            return Result(
+                false, "API Key 接口未命中",
+                "在控制台域名上试了 ${traces.size} 个候选路径，均未成功：\n\n$err\n\n" +
+                    "备用方案：在移动云控制台「系统管理 → API Key」手动复制后，" +
+                    "在 App 的「设置」里粘贴即可。",
+            )
         }
+        return Result(true, "API Key 获取成功", extractKeys(hit.body))
     }
 
-    /** 只返回提取到的 Key 列表（供自动回填使用，不产生文案） */
+    fun extractKeys(json: String): String = try {
+        val found = LinkedHashSet<String>()
+        collectKeys(Any2Json.parse(json), found)
+        if (found.isEmpty()) json.take(800)
+        else "发现 ${found.size} 个 Key：\n" + found.joinToString("\n") { "• $it" }
+    } catch (_: Exception) {
+        json.take(800)
+    }
+
     fun extractKeyList(json: String): List<String> = try {
         val found = LinkedHashSet<String>()
         collectKeys(Any2Json.parse(json), found)
@@ -225,20 +369,7 @@ class EcloudApi(private val cookie: String) {
         emptyList()
     }
 
-    /** 仅返回成功时的原始 JSON（供自动回填使用） */
-    fun fetchApiKeysRaw(): String? {
-        val r = tryPaths(
-            listOf(
-                "/api/moma/apikey/list",
-                "/api/apikey/list",
-                "/api/user/apikey/list",
-                "/api/moma/apiKey/page",
-            ),
-        )
-        return if (r.first == 200) r.second else null
-    }
-
-    private fun collectKeys(node: Any?, out: MutableSet<String> ) {
+    private fun collectKeys(node: Any?, out: MutableSet<String>) {
         when (node) {
             is JSONObject -> {
                 val keys = node.keys()
@@ -247,6 +378,7 @@ class EcloudApi(private val cookie: String) {
                     val v = node.opt(k)
                     if (v is String && (k.contains("key", true) || k.contains("token", true))
                         && v.length in 8..128 && !v.startsWith("http")
+                        && !v.startsWith("Bearer")
                     ) {
                         out.add(v)
                     }
@@ -255,6 +387,10 @@ class EcloudApi(private val cookie: String) {
             }
             is JSONArray -> for (i in 0 until node.length()) collectKeys(node.opt(i), out)
         }
+    }
+
+    companion object {
+        const val DEFAULT_CONSOLE_HOST = "console-huhehaote-1.cmecloud.cn"
     }
 }
 
