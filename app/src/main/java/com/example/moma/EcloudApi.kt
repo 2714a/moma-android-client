@@ -216,6 +216,28 @@ class EcloudApi(private val cookie: String) {
         }
     }
 
+    /** 只返回提取到的 Key 列表（供自动回填使用，不产生文案） */
+    fun extractKeyList(json: String): List<String> = try {
+        val found = LinkedHashSet<String>()
+        collectKeys(Any2Json.parse(json), found)
+        found.toList()
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    /** 仅返回成功时的原始 JSON（供自动回填使用） */
+    fun fetchApiKeysRaw(): String? {
+        val r = tryPaths(
+            listOf(
+                "/api/moma/apikey/list",
+                "/api/apikey/list",
+                "/api/user/apikey/list",
+                "/api/moma/apiKey/page",
+            ),
+        )
+        return if (r.first == 200) r.second else null
+    }
+
     private fun collectKeys(node: Any?, out: MutableSet<String> ) {
         when (node) {
             is JSONObject -> {
