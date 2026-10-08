@@ -1,0 +1,6 @@
+<resources>
+    <color name="green_primary">#1AAD19</color>
+    <color name="bubble_user">#95EC69</color>
+    <color name="bubble_ai">#F1F1F1</color>
+    <color name="text_dark">#222222</color>
+</resources>
