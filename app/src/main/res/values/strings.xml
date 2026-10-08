@@ -10,5 +10,6 @@
     <string name="model_hint">模型名称</string>
     <string name="temperature_hint">温度 (0-2)</string>
     <string name="max_tokens_hint">最大 Token</string>
+    <string name="console_host_hint">控制台区域域名（如 console-huhehaote-1.cmecloud.cn）</string>
     <string name="save">保存</string>
 </resources>
