@@ -29,5 +29,18 @@ class ConfigStore(ctx: Context) {
         get() = sp.getInt("max_tokens", 2048)
         set(v) = sp.edit().putInt("max_tokens", v).apply()
 
+    /** 本地网关监听端口 */
+    var port: Int
+        get() = sp.getInt("port", 8080)
+        set(v) = sp.edit().putInt("port", v).apply()
+
     fun hasKey(): Boolean = apiKeys.isNotEmpty()
+
+    /** 网关地址描述，用于界面展示 */
+    fun upstreamHost(): String = try {
+        val u = java.net.URI(baseUrl.trimEnd('/'))
+        (u.host ?: baseUrl) + if (u.port > 0) ":${u.port}" else ""
+    } catch (_: Exception) {
+        baseUrl
+    }
 }
