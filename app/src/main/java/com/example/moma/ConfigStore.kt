@@ -46,12 +46,31 @@ class ConfigStore(ctx: Context) {
 
     /** 移动云门户首页（WebView 登录入口） */
     var portalUrl: String
-        get() = sp.getString("portal_url", "https://ecloud.10086.cn/portal/product/MaaS") ?: ""
+        get() = sp.getString("portal_url", "https://ecloud.10086.cn/portal") ?: ""
         set(v) = sp.edit().putString("portal_url", v).apply()
+
+    /**
+     * OAuth2 access_token（登录成功后由授权码换取）。
+     * 移动云控制台接口需要 Authorization: Bearer <accessToken>，仅靠 Cookie 不够。
+     */
+    var accessToken: String
+        get() = sp.getString("access_token", "") ?: ""
+        set(v) = sp.edit().putString("access_token", v).apply()
+
+    var refreshToken: String
+        get() = sp.getString("refresh_token", "") ?: ""
+        set(v) = sp.edit().putString("refresh_token", v).apply()
+
+    /** 控制台区域域名，如 console-huhehaote-1.cmecloud.cn */
+    var consoleHost: String
+        get() = sp.getString("console_host", "console-huhehaote-1.cmecloud.cn") ?: ""
+        set(v) = sp.edit().putString("console_host", v).apply()
 
     fun hasCookie(): Boolean = cookie.isNotBlank() && cookie.contains("=")
 
     fun hasKey(): Boolean = apiKeys.isNotEmpty()
+
+    fun isLoggedIn(): Boolean = hasCookie() || accessToken.isNotBlank()
 
     /** 网关地址描述，用于界面展示 */
     fun upstreamHost(): String = try {
