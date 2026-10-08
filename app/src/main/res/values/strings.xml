@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">中国移动AI客户端</string>
+    <string name="title_activity_settings">设置</string>
+    <string name="hint_input">输入消息，点发送</string>
+    <string name="menu_settings">设置</string>
+    <string name="menu_new">新会话</string>
+    <string name="api_base_hint">API Base URL（以 /v1 结尾，可填反代地址）</string>
+    <string name="api_keys_hint">API Key（每行一个，自动轮询）</string>
+    <string name="model_hint">模型名称</string>
+    <string name="temperature_hint">温度 (0-2)</string>
+    <string name="max_tokens_hint">最大 Token</string>
+    <string name="save">保存</string>
+</resources>
