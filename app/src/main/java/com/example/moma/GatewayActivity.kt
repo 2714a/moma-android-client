@@ -66,10 +66,12 @@ class GatewayActivity : AppCompatActivity() {
         portChip.setOnClickListener { changePort() }
         findViewById<TextView>(R.id.btnCopyAddr).setOnClickListener { copyAddress() }
         btnStart.setOnClickListener { toggleGateway() }
-        findViewById<TextView>(R.id.btnTestUpstream).setOnClickListener { testUpstream() }
+        findViewById<TextView>(R.id.btnSession).setOnClickListener {
+            startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
+        }
         findViewById<TextView>(R.id.btnModels).setOnClickListener { fetchModels() }
-        findViewById<TextView>(R.id.btnKeyStats).setOnClickListener { showKeyStats() }
-        findViewById<TextView>(R.id.btnSelfTest).setOnClickListener { selfTest() }
+        findViewById<TextView>(R.id.btnSignin).setOnClickListener { doSignIn() }
+        findViewById<TextView>(R.id.btnQuota).setOnClickListener { fetchQuota() }
         findViewById<TextView>(R.id.btnLogs).setOnClickListener { showLogs() }
         findViewById<TextView>(R.id.btnSettings).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
@@ -77,11 +79,24 @@ class GatewayActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnApikey).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        findViewById<TextView>(R.id.btnBattery).setOnClickListener { requestBatteryWhitelist() }
         findViewById<TextView>(R.id.btnStress).setOnClickListener { stressTest() }
         findViewById<TextView>(R.id.btnCurl).setOnClickListener { showCurl() }
-        findViewById<TextView>(R.id.btnBattery).setOnClickListener { requestBatteryWhitelist() }
         findViewById<TextView>(R.id.btnChat).setOnClickListener {
             startActivity(Intent(this, MainActivity::class.java))
+        }
+    }
+
+    companion object {
+        private const val REQ_LOGIN = 1001
+    }
+
+    @Deprecated("兼容旧 API")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_LOGIN && resultCode == RESULT_OK) {
+            updateUi()
+            Toast.makeText(this, "登录成功，Cookie 已更新", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -112,6 +127,15 @@ class GatewayActivity : AppCompatActivity() {
         upstreamLine.text = "上游: ${cfg.upstreamHost()} · Key ×${cfg.apiKeys.size}"
         listenLine.text = "监听: 局域网开放（0.0.0.0:$port）"
         portChip.text = "↻ 端口 $port"
+
+        val loginLine = findViewById<TextView>(R.id.loginLine)
+        loginLine.text = if (cfg.hasCookie()) {
+            val t = cfg.cookieTs
+            val when_ = if (t > 0) java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(t)) else "未知"
+            "移动云: ✅ 已登录（$when_）"
+        } else {
+            "移动云: ❌ 未登录（点右上「登录/更新会话」）"
+        }
     }
 
     private fun lanIp(): String? {
@@ -185,9 +209,31 @@ class GatewayActivity : AppCompatActivity() {
             .show()
     }
 
+    /** 模型列表：优先走网页接口（需登录），失败回退到 API Key 方式 */
     private fun fetchModels() {
+        if (cfg.hasCookie()) {
+            Toast.makeText(this, "正在从移动云获取模型列表…", Toast.LENGTH_SHORT).show()
+            Thread {
+                val r = EcloudApi(cfg.cookie).fetchModels()
+                val text = if (r.ok) r.detail else {
+                    "网页接口获取失败：\n${r.detail}\n\n—— 改用 API Key 方式重试 ——"
+                }
+                runOnUiThread {
+                    if (r.ok) {
+                        showDialog("模型列表（移动云网页）", text)
+                    } else {
+                        fetchModelsViaApi()
+                    }
+                }
+            }.start()
+            return
+        }
+        fetchModelsViaApi()
+    }
+
+    private fun fetchModelsViaApi() {
         if (!cfg.hasKey()) {
-            Toast.makeText(this, "请先在设置中填写 API Key", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "请先登录移动云，或在设置中填写 API Key", Toast.LENGTH_SHORT).show()
             return
         }
         val base = cfg.baseUrl.trimEnd('/').removeSuffix("/chat/completions")
@@ -206,14 +252,50 @@ class GatewayActivity : AppCompatActivity() {
                 result.isNullOrBlank() -> "无法访问上游 /v1/models\n请检查网络、上游地址与 Key"
                 else -> formatModels(result!!)
             }
-            runOnUiThread {
-                AlertDialog.Builder(this)
-                    .setTitle("模型列表（上游）")
-                    .setMessage(text)
-                    .setPositiveButton("好的", null)
-                    .show()
-            }
+            runOnUiThread { showDialog("模型列表（API Key）", text) }
         }.start()
+    }
+
+    /** 签到领积分 */
+    private fun doSignIn() {
+        if (!cfg.hasCookie()) {
+            Toast.makeText(this, "请先登录移动云", Toast.LENGTH_SHORT).show()
+            startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
+            return
+        }
+        Toast.makeText(this, "正在签到…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val r = EcloudApi(cfg.cookie).signIn()
+            runOnUiThread { showDialog(if (r.ok) "签到结果" else "签到失败", r.detail) }
+        }.start()
+    }
+
+    /** 查询剩余额度 */
+    private fun fetchQuota() {
+        if (!cfg.hasCookie()) {
+            Toast.makeText(this, "请先登录移动云", Toast.LENGTH_SHORT).show()
+            startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
+            return
+        }
+        Toast.makeText(this, "正在查询额度…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val r = EcloudApi(cfg.cookie).fetchQuota()
+            runOnUiThread { showDialog(if (r.ok) "剩余额度" else "查询失败", r.detail) }
+        }.start()
+    }
+
+    /** 统一弹窗 */
+    private fun showDialog(title: String, msg: String) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(msg)
+            .setPositiveButton("好的", null)
+            .setNeutralButton("复制") { _, _ ->
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("moma", msg))
+                Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show()
+            }
+            .show()
     }
 
     private fun formatModels(json: String): String = try {
