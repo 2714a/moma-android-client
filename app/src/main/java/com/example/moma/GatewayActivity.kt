@@ -70,9 +70,10 @@ class GatewayActivity : AppCompatActivity() {
             startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
         }
         findViewById<TextView>(R.id.btnModels).setOnClickListener { fetchModels() }
+        findViewById<TextView>(R.id.btnCheckLogin).setOnClickListener { checkCloudLogin() }
         findViewById<TextView>(R.id.btnSignin).setOnClickListener { doSignIn() }
         findViewById<TextView>(R.id.btnQuota).setOnClickListener { fetchQuota() }
-        findViewById<TextView>(R.id.btnLogs).setOnClickListener { showLogs() }
+        findViewById<TextView>(R.id.btnLogs).setOnClickListener { showDiagnostics() }
         findViewById<TextView>(R.id.btnSettings).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
@@ -127,12 +128,13 @@ class GatewayActivity : AppCompatActivity() {
         portChip.text = "↻ 端口 $port"
 
         val loginLine = findViewById<TextView>(R.id.loginLine)
-        loginLine.text = if (cfg.hasCookie()) {
+        loginLine.text = if (cfg.isLoggedIn()) {
             val t = cfg.cookieTs
             val when_ = if (t > 0) java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(t)) else "未知"
-            "移动云: ✅ 已登录（$when_）"
+            val tokenMark = if (cfg.accessToken.isNotBlank()) " · Token✓" else ""
+            "移动云: ✅ 已登录（$when_$tokenMark）"
         } else {
-            "移动云: ❌ 未登录（点右上「登录/更新会话」）"
+            "移动云: ❌ 未登录（点右上「登录 / 更新会话」）"
         }
     }
 
@@ -207,101 +209,86 @@ class GatewayActivity : AppCompatActivity() {
             .show()
     }
 
-    /** 模型列表：优先走网页接口（需登录），失败回退到 API Key 方式 */
-    private fun fetchModels() {
-        if (cfg.hasCookie()) {
-            Toast.makeText(this, "正在从移动云获取模型列表…", Toast.LENGTH_SHORT).show()
-            Thread {
-                val r = EcloudApi(cfg.cookie).fetchModels()
-                val text = if (r.ok) r.detail else {
-                    "网页接口获取失败：\n${r.detail}\n\n—— 改用 API Key 方式重试 ——"
-                }
-                runOnUiThread {
-                    if (r.ok) {
-                        showDialog("模型列表（移动云网页）", text)
-                    } else {
-                        fetchModelsViaApi()
-                    }
-                }
-            }.start()
-            return
-        }
-        fetchModelsViaApi()
-    }
+    /** 统一的 EcloudApi 构造：带上 Cookie / accessToken / 控制台域名 */
+    private fun cloudApi(): EcloudApi =
+        EcloudApi(cfg.cookie, cfg.accessToken, cfg.consoleHost)
 
-    private fun fetchModelsViaApi() {
+    /**
+     * 模型列表：/v1/models 路径是实测确定存在的，直接用配置的 Key 请求上游。
+     * 未配置 Key 时，才尝试从移动云侧取。
+     */
+    private fun fetchModels() {
         if (!cfg.hasKey()) {
-            Toast.makeText(this, "请先登录移动云，或在设置中填写 API Key", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "请先配置 API Key（或点「获取 API Key」）", Toast.LENGTH_SHORT).show()
             return
         }
-        val base = cfg.baseUrl.trimEnd('/').removeSuffix("/chat/completions")
-        val key = cfg.apiKeys.first()
+        Toast.makeText(this, "正在从上游获取模型列表…", Toast.LENGTH_SHORT).show()
         Thread {
-            var result: String? = null
-            try {
-                val rb = Request.Builder().url("$base/models").get()
-                    .header("Authorization", "Bearer $key")
-                OkHttpClient().newCall(rb.build()).execute().use { resp ->
-                    result = resp.body?.string()
-                }
-            } catch (_: Exception) {
+            val r = cloudApi().fetchModels(cfg.baseUrl, cfg.apiKeys.first())
+            runOnUiThread {
+                showDialog(if (r.ok) "模型列表" else "获取模型列表失败", r.detail)
             }
-            val text = when {
-                result.isNullOrBlank() -> "无法访问上游 /v1/models\n请检查网络、上游地址与 Key"
-                else -> formatModels(result!!)
-            }
-            runOnUiThread { showDialog("模型列表（API Key）", text) }
         }.start()
     }
 
     /** 签到领积分 */
     private fun doSignIn() {
-        if (!cfg.hasCookie()) {
+        if (!cfg.isLoggedIn()) {
             Toast.makeText(this, "请先登录移动云", Toast.LENGTH_SHORT).show()
             startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
             return
         }
         Toast.makeText(this, "正在签到…", Toast.LENGTH_SHORT).show()
         Thread {
-            val r = EcloudApi(cfg.cookie).signIn()
+            val r = cloudApi().signIn()
             runOnUiThread { showDialog(if (r.ok) "签到结果" else "签到失败", r.detail) }
         }.start()
     }
 
     /** 查询剩余额度 */
     private fun fetchQuota() {
-        if (!cfg.hasCookie()) {
+        if (!cfg.isLoggedIn()) {
             Toast.makeText(this, "请先登录移动云", Toast.LENGTH_SHORT).show()
             startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
             return
         }
         Toast.makeText(this, "正在查询额度…", Toast.LENGTH_SHORT).show()
         Thread {
-            val r = EcloudApi(cfg.cookie).fetchQuota()
+            val r = cloudApi().fetchQuota()
             runOnUiThread { showDialog(if (r.ok) "剩余额度" else "查询失败", r.detail) }
+        }.start()
+    }
+
+    /** 检查移动云登录态（实测可用接口） */
+    private fun checkCloudLogin() {
+        Toast.makeText(this, "正在检查登录态…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val r = cloudApi().checkLoginStatus()
+            runOnUiThread { showDialog(r.title, r.detail) }
         }.start()
     }
 
     /** 从移动云自动获取 API Key 并回填到设置 */
     private fun autoFetchKeys() {
-        if (!cfg.hasCookie()) {
+        if (!cfg.isLoggedIn()) {
             Toast.makeText(this, "请先登录移动云", Toast.LENGTH_SHORT).show()
             startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
             return
         }
         Toast.makeText(this, "正在从移动云获取 API Key…", Toast.LENGTH_SHORT).show()
         Thread {
-            val api = EcloudApi(cfg.cookie)
+            val api = cloudApi()
             val raw = api.fetchApiKeysRaw()
             if (raw == null) {
                 runOnUiThread {
                     showDialog(
-                        "获取失败",
-                        "未能从移动云获取 API Key。\n\n可能原因：\n" +
-                            "1. 接口路径与当前平台版本不一致\n" +
-                            "2. Cookie 已过期（重新登录）\n" +
-                            "3. 账号下还没有创建 API Key\n\n" +
-                            "请到「设置」手动填写，或先到移动云控制台创建 Key。",
+                        "未能自动获取",
+                        "控制台接口未命中（路径未知或未登录）。\n\n" +
+                            "请改用这个方式，一定能拿到：\n" +
+                            "1. 点「登录 / 更新会话」进入移动云；\n" +
+                            "2. 在控制台左侧「系统管理 → API Key」创建一个 Key；\n" +
+                            "3. 复制后回到本页，点「设置」粘贴保存。\n\n" +
+                            "（也可以把上面「诊断与日志」里的记录发我，我按真实接口修正）",
                     )
                 }
                 return@Thread
@@ -342,16 +329,6 @@ class GatewayActivity : AppCompatActivity() {
                 Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show()
             }
             .show()
-    }
-
-    private fun formatModels(json: String): String = try {
-        val arr = JSONObject(json).optJSONArray("data")
-        if (arr == null || arr.length() == 0) json.take(800)
-        else (0 until arr.length()).joinToString("\n") {
-            "• " + arr.getJSONObject(it).optString("id")
-        }
-    } catch (_: Exception) {
-        json.take(800)
     }
 
     /** 上游连通性测试：逐个测试所有 API Key */
@@ -568,6 +545,36 @@ class GatewayActivity : AppCompatActivity() {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("curl", curl))
                 Toast.makeText(this, "已复制 cURL", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    /** 诊断菜单：把自测 / Key 统计 / 上游测试 / 日志都收进来，避免按钮堆积 */
+    private fun showDiagnostics() {
+        val items = arrayOf(
+            "查看网关日志",
+            "本地网关自测（/health + /v1/models）",
+            "上游连通性测试（逐个 Key）",
+            "各 Key 调用次数统计",
+            "复制日志到剪贴板",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("诊断与日志")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> showLogs()
+                    1 -> selfTest()
+                    2 -> testUpstream()
+                    3 -> showKeyStats()
+                    4 -> {
+                        val logs = GatewayService.gateway?.recentLogs()
+                        val text = if (logs.isNullOrEmpty()) "暂无日志。" else logs.takeLast(200).joinToString("\n")
+                        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("moma_logs", text))
+                        Toast.makeText(this, "日志已复制", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
             .setNegativeButton("关闭", null)
             .show()
