@@ -1,13 +1,18 @@
 package com.example.moma
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -18,6 +23,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 /**
  * 移动云登录页（内置 WebView 抓 Cookie）。
@@ -38,6 +45,13 @@ class LoginActivity : AppCompatActivity() {
         "ecloud_session", "SESSION", "sessionid", "token", "access_token",
         "ecloud_token", "cmecloud", "uac", "userToken",
     )
+
+    companion object {
+        private const val REQ_CAMERA = 2001
+    }
+
+    /** 当前 H5 页面发起的权限请求（主要是摄像头），授权后回调它 */
+    private var pendingWebPermission: PermissionRequest? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,6 +99,33 @@ class LoginActivity : AppCompatActivity() {
             ): Boolean = false
         }
 
+        // H5 调摄像头（扫码登录）必须由 App 代理授权
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                if (request == null) return
+                val wantsCamera = request.resources.any {
+                    it == PermissionRequest.RESOURCE_VIDEO_CAPTURE
+                }
+                if (!wantsCamera) {
+                    runOnUiThread { request.deny() }
+                    return
+                }
+                if (hasCameraPermission()) {
+                    runOnUiThread { request.grant(request.resources) }
+                } else {
+                    pendingWebPermission = request
+                    ActivityCompat.requestPermissions(
+                        this@LoginActivity,
+                        arrayOf(Manifest.permission.CAMERA),
+                        REQ_CAMERA,
+                    )
+                }
+            }
+        }
+
+        // 首次进入即申请摄像头权限（扫码登录需要）
+        ensureCameraPermission()
+
         findViewById<TextView>(R.id.btnSaveCookie).setOnClickListener { saveCookie() }
         findViewById<TextView>(R.id.btnManualCookie).setOnClickListener { manualInput() }
         findViewById<TextView>(R.id.btnOpenPortal).setOnClickListener {
@@ -92,6 +133,51 @@ class LoginActivity : AppCompatActivity() {
         }
 
         web.loadUrl(cfg.portalUrl)
+    }
+
+    // ---------- 摄像头权限 ----------
+
+    private fun hasCameraPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun ensureCameraPermission() {
+        if (!hasCameraPermission()) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.CAMERA), REQ_CAMERA,
+            )
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_CAMERA) return
+        val granted = grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        val pending = pendingWebPermission
+        pendingWebPermission = null
+        if (pending != null) {
+            if (granted) {
+                pending.grant(pending.resources)
+            } else {
+                pending.deny()
+                Toast.makeText(
+                    this,
+                    "未授予摄像头权限，扫码登录将不可用（可用短信/密码登录）",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        } else if (!granted) {
+            Toast.makeText(
+                this,
+                "未授予摄像头权限，扫码登录将不可用（可用短信/密码登录）",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
     }
 
     override fun onSupportNavigateUp(): Boolean {
@@ -143,8 +229,43 @@ class LoginActivity : AppCompatActivity() {
         cfg.cookie = cookies
         cfg.cookieTs = System.currentTimeMillis()
         Toast.makeText(this, "登录 Cookie 已保存（${cookies.length} 字节）", Toast.LENGTH_LONG).show()
-        setResult(RESULT_OK)
-        finish()
+        // 保存后自动尝试抓取 API Key 并回填，免去手工设置
+        autoFillKeys(cookies)
+    }
+
+    /** 登录后自动尝试拉取 API Key 并写入设置，省去「先设置 key」这一步 */
+    private fun autoFillKeys(cookies: String) {
+        statusLine.text = "已保存登录态，正在尝试自动获取 API Key…"
+        Thread {
+            val api = EcloudApi(cookies)
+            val raw = api.fetchApiKeysRaw()
+            val keys = if (raw != null) api.extractKeyList(raw) else emptyList()
+            runOnUiThread {
+                if (keys.isNotEmpty()) {
+                    // 去重合并，保留已有 Key
+                    val merged = LinkedHashSet<String>(cfg.apiKeys)
+                    val before = merged.size
+                    merged.addAll(keys)
+                    cfg.apiKeys = merged.toList()
+                    val added = merged.size - before
+                    statusLine.text = "已自动获取并写入 $added 个 API Key（共 ${merged.size} 个）"
+                    Toast.makeText(
+                        this,
+                        if (added > 0) "已自动回填 $added 个 API Key" else "API Key 已是最新（${merged.size} 个）",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    statusLine.text = "登录已保存 · 未自动获取到 Key，可到「设置」手动填写"
+                    Toast.makeText(
+                        this,
+                        "登录已保存。未自动获取到 API Key，请到「设置」手动填写",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                setResult(RESULT_OK)
+                finish()
+            }
+        }.start()
     }
 
     private fun manualInput() {
