@@ -76,9 +76,7 @@ class GatewayActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnSettings).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
-        findViewById<TextView>(R.id.btnApikey).setOnClickListener {
-            startActivity(Intent(this, SettingsActivity::class.java))
-        }
+        findViewById<TextView>(R.id.btnApikey).setOnClickListener { autoFetchKeys() }
         findViewById<TextView>(R.id.btnBattery).setOnClickListener { requestBatteryWhitelist() }
         findViewById<TextView>(R.id.btnStress).setOnClickListener { stressTest() }
         findViewById<TextView>(R.id.btnCurl).setOnClickListener { showCurl() }
@@ -281,6 +279,54 @@ class GatewayActivity : AppCompatActivity() {
         Thread {
             val r = EcloudApi(cfg.cookie).fetchQuota()
             runOnUiThread { showDialog(if (r.ok) "剩余额度" else "查询失败", r.detail) }
+        }.start()
+    }
+
+    /** 从移动云自动获取 API Key 并回填到设置 */
+    private fun autoFetchKeys() {
+        if (!cfg.hasCookie()) {
+            Toast.makeText(this, "请先登录移动云", Toast.LENGTH_SHORT).show()
+            startActivityForResult(Intent(this, LoginActivity::class.java), REQ_LOGIN)
+            return
+        }
+        Toast.makeText(this, "正在从移动云获取 API Key…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val api = EcloudApi(cfg.cookie)
+            val raw = api.fetchApiKeysRaw()
+            if (raw == null) {
+                runOnUiThread {
+                    showDialog(
+                        "获取失败",
+                        "未能从移动云获取 API Key。\n\n可能原因：\n" +
+                            "1. 接口路径与当前平台版本不一致\n" +
+                            "2. Cookie 已过期（重新登录）\n" +
+                            "3. 账号下还没有创建 API Key\n\n" +
+                            "请到「设置」手动填写，或先到移动云控制台创建 Key。",
+                    )
+                }
+                return@Thread
+            }
+            val keys = api.extractKeyList(raw)
+            runOnUiThread {
+                if (keys.isEmpty()) {
+                    showDialog(
+                        "未发现 Key",
+                        "接口返回成功，但没解析出 Key 字段。\n\n原始返回（节选）：\n${raw.take(600)}",
+                    )
+                } else {
+                    val merged = LinkedHashSet<String>(cfg.apiKeys)
+                    val before = merged.size
+                    merged.addAll(keys)
+                    cfg.apiKeys = merged.toList()
+                    val added = merged.size - before
+                    updateUi()
+                    showDialog(
+                        "已回填 API Key",
+                        "新获取 ${keys.size} 个，本次新增 $added 个\n当前共 ${merged.size} 个 Key 已生效。\n\n" +
+                            keys.joinToString("\n") { "• " + maskKey(it) },
+                    )
+                }
+            }
         }.start()
     }
 
