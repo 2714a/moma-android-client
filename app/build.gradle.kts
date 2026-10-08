@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.moma"
         minSdk = 21
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0-gateway"
+        versionCode = 3
+        versionName = "2.4-cloud"
     }
 
     buildTypes {
