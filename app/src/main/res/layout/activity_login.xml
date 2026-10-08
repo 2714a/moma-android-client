@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F3F3F8"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar_login"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="#1F6BFF"
+        app:navigationIcon="@android:drawable/ic_menu_revert"
+        app:title="移动云登录"
+        app:titleTextColor="#FFFFFF" />
+
+    <TextView
+        android:id="@+id/loginStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#FFF7E6"
+        android:paddingStart="16dp"
+        android:paddingTop="10dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="10dp"
+        android:text="正在打开移动云登录页…"
+        android:textColor="#8A6D00"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#FFFFFF"
+        android:orientation="horizontal"
+        android:padding="10dp">
+
+        <TextView
+            android:id="@+id/btnSaveCookie"
+            style="@style/PillButton"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_marginEnd="5dp"
+            android:layout_weight="1"
+            android:background="#1F6BFF"
+            android:text="保存登录"
+            android:textColor="#FFFFFF" />
+
+        <TextView
+            android:id="@+id/btnManualCookie"
+            style="@style/PillButton"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_marginStart="5dp"
+            android:layout_marginEnd="5dp"
+            android:layout_weight="1.2"
+            android:text="手动粘贴 Cookie" />
+
+        <TextView
+            android:id="@+id/btnOpenPortal"
+            style="@style/PillButton"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_marginStart="5dp"
+            android:layout_weight="1"
+            android:text="回首页" />
+    </LinearLayout>
+
+    <WebView
+        android:id="@+id/webview"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+</LinearLayout>
