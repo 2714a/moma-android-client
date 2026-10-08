@@ -18,8 +18,29 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # 直接使用 ubuntu-latest Runner 预装的 Android SDK，
+      # 避免 android-actions/setup-android@v3 的 sdkmanager 版本冲突。
+      - name: Configure Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          ls "$ANDROID_SDK_ROOT" || true
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Ensure required SDK components
+        run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
+
+      - name: Generate Gradle wrapper if missing
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.9 || true
+          fi
+          chmod +x ./gradlew || true
 
       - name: Build debug APK
         uses: gradle/gradle-build-action@v3
