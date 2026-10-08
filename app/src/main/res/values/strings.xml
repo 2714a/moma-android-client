@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">中国移动AI客户端</string>
+    <string name="app_name">MoMA 网关</string>
     <string name="title_activity_settings">设置</string>
     <string name="hint_input">输入消息，点发送</string>
     <string name="menu_settings">设置</string>
